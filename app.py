@@ -58,7 +58,7 @@ if st.button("Comprobar estadísticas"):
         respuesta_estadisticas = requests.get(
             "https://v3.football.api-sports.io/fixtures/statistics",
             headers={"x-apisports-key": API_KEY},
-            params={"fixture": st.session_state.get("fixture_id", 1598819)},
+            params={"fixture": 1493224},
             timeout=15
         )
         datos_estadisticas = respuesta_estadisticas.json()
