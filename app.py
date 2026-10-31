@@ -46,7 +46,7 @@ if st.button("Comprobar acceso a partidos"):
         else:
             partidos = datos_partidos.get("response", [])
             if partidos:
-    st.session_state["fixture_id"] = partidos[0]["fixture"]["id"]
+              st.session_state["fixture_id"] = partidos[0]["fixture"]["id"]
             st.success(f"Consulta correcta. Partidos encontrados: {len(partidos)}")
             if partidos:
                 st.write(partidos[10])
