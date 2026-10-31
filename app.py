@@ -31,9 +31,27 @@ if API_KEY:
         st.sidebar.write("API-Sports: no se pudo conectar")
 else:
     st.sidebar.write("API-Sports: falta configurar la clave")
+if st.button("Comprobar acceso a partidos"):
+    try:
+        respuesta_partidos = requests.get(
+            "https://v3.football.api-sports.io/fixtures",
+            headers={"x-apisports-key": API_KEY},
+            params={"next": "1"},
+            timeout=15
+        )
+        datos_partidos = respuesta_partidos.json()
+
+        if datos_partidos.get("errors"):
+            st.error("La API no permite consultar partidos con esta clave.")
+        else:
+            partidos = datos_partidos.get("response", [])
+            st.success(f"Consulta correcta. Partidos encontrados: {len(partidos)}")
+            if partidos:
+                st.write(partidos[0])
+    except Exception:
+        st.error("No se pudo consultar la API.")
 st.title("📊 SmartBet AI")
 st.caption("Analizador probabilístico multideporte · valor esperado · registro de apuestas")
-
 def db():
     con=sqlite3.connect(DB_PATH)
     con.execute("""CREATE TABLE IF NOT EXISTS bets (
