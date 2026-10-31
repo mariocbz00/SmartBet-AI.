@@ -1,715 +1,387 @@
-import os
-import sqlite3
-from datetime import datetime, timezone
 
-import joblib
-import pandas as pd
-import requests
 import streamlit as st
+import requests
+import pandas as pd
+import json
+from datetime import date
 
-from sklearn.ensemble import HistGradientBoostingClassifier
-from sklearn.impute import SimpleImputer
-from sklearn.metrics import accuracy_score, brier_score_loss, log_loss
-from sklearn.model_selection import train_test_split
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
-
-
-# =====================================================
+# --------------------------------------------------
 # CONFIGURACIÓN
-# =====================================================
+# --------------------------------------------------
 
 st.set_page_config(
     page_title="SmartBet AI",
-    page_icon="📊",
+    page_icon="⚽",
     layout="wide"
 )
 
-API_KEY = st.secrets.get("API_SPORTS_KEY", "")
-DB_PATH = os.getenv("SMARTBET_DB", "smartbet.db")
-MODEL_PATH = "smartbet_model.joblib"
+st.title("⚽ SmartBet AI")
+st.caption("Pronósticos automáticos de fútbol")
 
 API_URL = "https://v3.football.api-sports.io"
-API_HEADERS = {"x-apisports-key": API_KEY}
 
+try:
+    API_KEY = st.secrets["API_SPORTS_KEY"]
+except Exception:
+    API_KEY = ""
 
-# =====================================================
-# BASE DE DATOS
-# =====================================================
+# --------------------------------------------------
+# CONEXIÓN CON API-FOOTBALL
+# --------------------------------------------------
 
-def db():
-    con = sqlite3.connect(DB_PATH)
-
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS bets (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            created_at TEXT,
-            sport TEXT,
-            event TEXT,
-            market TEXT,
-            selection TEXT,
-            odds REAL,
-            probability REAL,
-            stake REAL,
-            ev_pct REAL,
-            status TEXT DEFAULT 'Pendiente',
-            result TEXT,
-            profit REAL
-        )
-    """)
-
-    con.commit()
-    return con
-
-
-# =====================================================
-# FUNCIONES DE CÁLCULO
-# =====================================================
-
-def metrics(odds, probability):
-    implied = 1 / odds
-    ev = probability * odds - 1
-    fair = 1 / probability if probability > 0 else None
-
-    b = odds - 1
-    kelly = (
-        (b * probability - (1 - probability)) / b
-        if b > 0 else 0
-    )
-
-    return implied, ev, fair, max(0, min(kelly, 0.25))
-
-
-def recommend(row, min_ev, min_prob):
-    try:
-        odds = float(row["odds"])
-        probability = float(row["probability"])
-
-        if odds <= 1 or not 0 < probability < 1:
-            return False
-
-        ev = probability * odds - 1
-
-        return ev > max(0.0, min_ev) and probability >= min_prob
-
-    except Exception:
-        return False
-
-
-# =====================================================
-# CONEXIÓN API
-# =====================================================
-
-def api_get(endpoint, params=None):
+def consultar_api(endpoint, parametros=None):
     if not API_KEY:
-        raise ValueError("Falta configurar la clave API.")
+        raise Exception(
+            "Falta la clave API_SPORTS_KEY en los Secrets de Streamlit."
+        )
 
-    response = requests.get(
-        f"{API_URL}/{endpoint}",
-        headers=API_HEADERS,
-        params=params,
-        timeout=20
+    url = f"{API_URL}/{endpoint}"
+
+    respuesta = requests.get(
+        url,
+        headers={"x-apisports-key": API_KEY},
+        params=parametros or {},
+        timeout=25
     )
 
-    response.raise_for_status()
-    data = response.json()
+    if respuesta.status_code == 429:
+        raise Exception(
+            "Límite de consultas alcanzado (429). "
+            "Espera antes de volver a consultar."
+        )
 
-    if data.get("errors"):
-        raise ValueError(str(data["errors"]))
+    respuesta.raise_for_status()
 
-    return data.get("response", [])
+    datos = respuesta.json()
+
+    if datos.get("errors"):
+        raise Exception(str(datos["errors"]))
+
+    return datos.get("response", [])
 
 
-# =====================================================
-# ESTADO DE LA API
-# =====================================================
+# --------------------------------------------------
+# FUNCIONES DE PRONÓSTICO
+# --------------------------------------------------
 
-st.title("📊 SmartBet AI")
-st.caption(
-    "Analizador deportivo · Probabilidades · Valor esperado · Registro"
+def convertir_porcentaje(valor):
+    if valor is None:
+        return None
+
+    try:
+        return float(str(valor).replace("%", "").strip())
+    except (ValueError, TypeError):
+        return None
+
+
+def obtener_pronostico(fixture_id):
+    resultados = consultar_api(
+        "predictions",
+        {"fixture": fixture_id}
+    )
+
+    if not resultados:
+        return None
+
+    return resultados[0]
+
+
+def extraer_porcentajes(prediccion):
+    porcentajes = (
+        prediccion.get("predictions", {})
+        .get("percent", {})
+    )
+
+    return {
+        "local": convertir_porcentaje(porcentajes.get("home")),
+        "empate": convertir_porcentaje(porcentajes.get("draw")),
+        "visitante": convertir_porcentaje(porcentajes.get("away"))
+    }
+
+
+def elegir_favorito(prediccion, equipo_local, equipo_visitante):
+    porcentajes = extraer_porcentajes(prediccion)
+
+    opciones = {
+        equipo_local: porcentajes["local"],
+        "Empate": porcentajes["empate"],
+        equipo_visitante: porcentajes["visitante"]
+    }
+
+    disponibles = {
+        equipo: porcentaje
+        for equipo, porcentaje in opciones.items()
+        if porcentaje is not None
+    }
+
+    if not disponibles:
+        return None, None
+
+    favorito = max(disponibles, key=disponibles.get)
+
+    return favorito, disponibles[favorito]
+
+
+# --------------------------------------------------
+# PANEL LATERAL
+# --------------------------------------------------
+
+st.sidebar.header("Configuración")
+
+fecha = st.sidebar.date_input(
+    "Fecha de los partidos",
+    value=date.today()
+)
+
+umbral = st.sidebar.slider(
+    "Probabilidad mínima (%)",
+    min_value=50,
+    max_value=99,
+    value=95
+)
+
+limite_partidos = st.sidebar.selectbox(
+    "Máximo de partidos por consulta",
+    [3, 5, 8, 10],
+    index=1
 )
 
 if API_KEY:
-    try:
-        api_get("status")
-        st.sidebar.success("API-Sports: conexión correcta")
-    except Exception as e:
-        st.sidebar.error(f"API-Sports: {e}")
+    st.sidebar.success("Conexión API configurada")
 else:
-    st.sidebar.warning("Falta configurar API_SPORTS_KEY en Secrets")
+    st.sidebar.error("Falta configurar la clave API")
 
 
-# =====================================================
-# CONSULTA DE PARTIDOS
-# =====================================================
+# --------------------------------------------------
+# EXPLICACIÓN
+# --------------------------------------------------
 
-st.header("⚽ Partidos")
+st.info(
+    "SmartBet AI consulta los partidos y sus predicciones. "
+    "Solo destacará los pronósticos que alcancen el porcentaje "
+    "mínimo seleccionado. Una predicción no garantiza un resultado."
+)
 
-if st.button("Comprobar acceso a partidos"):
-    try:
-        fecha = datetime.now().strftime("%Y-%m-%d")
+# --------------------------------------------------
+# BOTÓN PRINCIPAL
+# --------------------------------------------------
 
-        partidos = api_get(
-            "fixtures",
-            {"date": fecha}
+if st.button("🔎 BUSCAR PARTIDOS Y GENERAR PRONÓSTICOS", type="primary"):
+
+    if not API_KEY:
+        st.error(
+            "Configura API_SPORTS_KEY en los Secrets de Streamlit."
         )
 
-        st.session_state["fixture_ids"] = [
-            p["fixture"]["id"] for p in partidos[:10]
-        ]
-
-        st.session_state["fixtures"] = partidos[:10]
-
-        st.success(
-            f"Consulta correcta. Partidos encontrados: {len(partidos)}"
-        )
-
-        if partidos:
-            tabla = []
-
-            for partido in partidos[:10]:
-                tabla.append({
-                    "ID": partido["fixture"]["id"],
-                    "Partido": (
-                        partido["teams"]["home"]["name"]
-                        + " - "
-                        + partido["teams"]["away"]["name"]
-                    ),
-                    "Competición": partido["league"]["name"],
-                    "Fecha": partido["fixture"]["date"],
-                    "Estado": partido["fixture"]["status"]["short"]
-                })
-
-            st.dataframe(
-                pd.DataFrame(tabla),
-                use_container_width=True
-            )
-        else:
-            st.info("No se encontraron partidos para esta fecha.")
-
-    except Exception as e:
-        st.error(f"No se pudieron consultar los partidos: {e}")
-
-
-# =====================================================
-# CONSULTA DE ESTADÍSTICAS
-# =====================================================
-
-st.subheader("Estadísticas de partidos")
-
-if st.button("Comprobar estadísticas"):
-    fixture_ids = st.session_state.get("fixture_ids", [])
-
-    if not fixture_ids:
-        st.warning("Primero consulta los partidos.")
     else:
-        for fixture_id in fixture_ids:
-            st.markdown(f"**Partido ID: {fixture_id}**")
-
-            try:
-                estadisticas = api_get(
-                    "fixtures/statistics",
-                    {"fixture": fixture_id}
-                )
-
-                if estadisticas:
-                    st.success("Estadísticas disponibles")
-
-                    for equipo in estadisticas:
-                        st.write(equipo)
-
-                else:
-                    st.warning(
-                        "No hay estadísticas disponibles para este partido."
-                    )
-
-            except Exception as e:
-                st.error(
-                    f"Error al consultar el partido {fixture_id}: {e}"
-                )
-
-
-# =====================================================
-# CONFIGURACIÓN DE APUESTAS
-# =====================================================
-
-with st.sidebar:
-    st.header("Configuración")
-
-    min_prob = st.slider(
-        "Probabilidad mínima (%)",
-        1, 99, 95
-    ) / 100
-
-    min_ev = st.slider(
-        "EV mínimo (%)",
-        0, 30, 0
-    ) / 100
-
-    bankroll = st.number_input(
-        "Bankroll (€)",
-        min_value=0.0,
-        value=100.0,
-        step=10.0
-    )
-
-    kelly_fraction = st.select_slider(
-        "Kelly fraccional",
-        options=[0.0, 0.1, 0.2, 0.25, 0.5, 1.0],
-        value=0.25
-    )
-
-    st.caption(
-        "Solo se muestran selecciones que cumplen los filtros "
-        "de probabilidad y valor esperado."
-    )
-
-
-# =====================================================
-# PESTAÑAS
-# =====================================================
-
-tab1, tab2, tab3, tab4 = st.tabs([
-    "🔎 Analizador",
-    "🧠 Entrenar modelo",
-    "🧾 Registro",
-    "📈 Rendimiento"
-])
-
-
-# =====================================================
-# PESTAÑA 1: ANALIZADOR
-# =====================================================
-
-with tab1:
-    st.subheader("Analizar oportunidades")
-
-    st.write(
-        "Carga un CSV con estas columnas: "
-        "sport,event,market,selection,odds,probability."
-    )
-
-    plantilla = (
-        "sport,event,market,selection,odds,probability\n"
-        "Fútbol,Equipo A vs Equipo B,1X2,Equipo A,2.10,0.52\n"
-        "Tenis,Jugador A vs Jugador B,Ganador,Jugador A,1.80,0.60\n"
-    )
-
-    st.download_button(
-        "Descargar plantilla CSV",
-        plantilla,
-        "plantilla_apuestas.csv",
-        "text/csv"
-    )
-
-    file = st.file_uploader(
-        "CSV de cuotas y probabilidades",
-        type=["csv"],
-        key="analysis"
-    )
-
-    if file:
         try:
-            df = pd.read_csv(file)
+            with st.spinner("Buscando partidos..."):
 
-            required = [
-                "sport",
-                "event",
-                "market",
-                "selection",
-                "odds",
-                "probability"
+                partidos = consultar_api(
+                    "fixtures",
+                    {
+                        "date": fecha.strftime("%Y-%m-%d"),
+                        "timezone": "Europe/Madrid"
+                    }
+                )
+
+            # Solo partidos que todavía no han comenzado
+            partidos_pendientes = [
+                p for p in partidos
+                if p.get("fixture", {}).get("status", {}).get("short") == "NS"
             ]
 
-            missing = [
-                column for column in required
-                if column not in df.columns
-            ]
+            partidos_pendientes = partidos_pendientes[:limite_partidos]
 
-            if missing:
-                st.error(
-                    "Faltan columnas: " + ", ".join(missing)
+            if not partidos_pendientes:
+                st.warning(
+                    "No se encontraron partidos pendientes "
+                    "para esa fecha."
                 )
 
             else:
-                df["odds"] = pd.to_numeric(
-                    df["odds"],
-                    errors="coerce"
+                st.success(
+                    f"Se han encontrado {len(partidos_pendientes)} partidos."
                 )
 
-                df["probability"] = pd.to_numeric(
-                    df["probability"],
-                    errors="coerce"
-                )
+                resultados = []
 
-                df = df.dropna(
-                    subset=["odds", "probability"]
-                )
+                barra = st.progress(0)
 
-                df = df[
-                    (df["odds"] > 1)
-                    & (df["probability"] > 0)
-                    & (df["probability"] < 1)
-                ].copy()
+                for indice, partido in enumerate(partidos_pendientes):
 
-                df["implied_probability"] = 1 / df["odds"]
+                    fixture = partido.get("fixture", {})
+                    equipos = partido.get("teams", {})
+                    liga = partido.get("league", {})
 
-                df["ev_pct"] = (
-                    df["probability"] * df["odds"] - 1
-                ) * 100
-
-                df["cuota_justa"] = 1 / df["probability"]
-
-                df["recomendacion"] = df.apply(
-                    lambda r: recommend(
-                        {
-                            "odds": r["odds"],
-                            "probability": r["probability"]
-                        },
-                        min_ev,
-                        min_prob
-                    ),
-                    axis=1
-                )
-
-                df["stake_sugerido"] = df.apply(
-                    lambda r: (
-                        bankroll
-                        * metrics(
-                            r["odds"],
-                            r["probability"]
-                        )[3]
-                        * kelly_fraction
-                    ),
-                    axis=1
-                )
-
-                df["stake_sugerido"] = df[
-                    "stake_sugerido"
-                ].clip(upper=bankroll * 0.02)
-
-                st.dataframe(
-                    df.sort_values(
-                        "ev_pct",
-                        ascending=False
-                    ),
-                    use_container_width=True
-                )
-
-                picks = df[df["recomendacion"]]
-
-                if len(picks) > 0:
-                    st.success(
-                        f"{len(picks)} oportunidades cumplen los filtros."
+                    equipo_local = equipos.get("home", {}).get(
+                        "name", "Local"
                     )
 
-                    st.subheader("Oportunidades seleccionadas")
-
-                    st.dataframe(
-                        picks[
-                            [
-                                "sport",
-                                "event",
-                                "market",
-                                "selection",
-                                "odds",
-                                "probability",
-                                "ev_pct",
-                                "cuota_justa",
-                                "stake_sugerido"
-                            ]
-                        ],
-                        use_container_width=True
+                    equipo_visitante = equipos.get("away", {}).get(
+                        "name", "Visitante"
                     )
 
-                    chosen = st.selectbox(
-                        "Selecciona una apuesta para registrar",
-                        picks.index.tolist(),
-                        format_func=lambda i: (
-                            f"{picks.loc[i, 'sport']} | "
-                            f"{picks.loc[i, 'event']} | "
-                            f"{picks.loc[i, 'selection']}"
-                        )
-                    )
+                    fixture_id = fixture.get("id")
 
-                    stake = st.number_input(
-                        "Importe real (€)",
-                        min_value=0.0,
-                        value=float(
-                            picks.loc[chosen, "stake_sugerido"]
-                        ),
-                        step=1.0
-                    )
+                    try:
+                        prediccion = obtener_pronostico(fixture_id)
 
-                    if st.button("Guardar apuesta"):
-                        r = picks.loc[chosen]
-                        con = db()
+                        if not prediccion:
+                            resultados.append({
+                                "Partido": f"{equipo_local} - {equipo_visitante}",
+                                "Pronóstico": "Sin datos",
+                                "Probabilidad": None,
+                                "Liga": liga.get("name", ""),
+                                "Consejo API": "",
+                                "Estado": "NO APOSTAR"
+                            })
 
-                        con.execute(
-                            """
-                            INSERT INTO bets (
-                                created_at, sport, event, market,
-                                selection, odds, probability,
-                                stake, ev_pct
+                        else:
+                            favorito, porcentaje = elegir_favorito(
+                                prediccion,
+                                equipo_local,
+                                equipo_visitante
                             )
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            """,
-                            (
-                                datetime.now(timezone.utc).isoformat(),
-                                str(r["sport"]),
-                                str(r["event"]),
-                                str(r["market"]),
-                                str(r["selection"]),
-                                float(r["odds"]),
-                                float(r["probability"]),
-                                float(stake),
-                                float(r["ev_pct"])
+
+                            consejo = prediccion.get(
+                                "predictions", {}
+                            ).get("advice", "")
+
+                            if favorito is None:
+                                estado = "NO APOSTAR"
+                                pronostico = "Sin datos suficientes"
+
+                            elif porcentaje >= umbral:
+                                estado = (
+                                    "PENDIENTE DE COMPROBAR CUOTA"
+                                )
+                                pronostico = f"Gana {favorito}" if favorito != "Empate" else "Empate"
+
+                            else:
+                                estado = "NO APOSTAR"
+                                pronostico = (
+                                    f"Favorito: {favorito}"
+                                )
+
+                            resultados.append({
+                                "Partido": f"{equipo_local} - {equipo_visitante}",
+                                "Pronóstico": pronostico,
+                                "Probabilidad": porcentaje,
+                                "Liga": liga.get("name", ""),
+                                "Consejo API": consejo,
+                                "Estado": estado
+                            })
+
+                    except Exception as error:
+                        mensaje = str(error)
+
+                        st.warning(
+                            f"No se pudo consultar "
+                            f"{equipo_local} - {equipo_visitante}: {mensaje}"
+                        )
+
+                        # Si se alcanza el límite, detener las consultas
+                        if "429" in mensaje or "Límite" in mensaje:
+                            st.error(
+                                "Se detuvieron las consultas para "
+                                "evitar más errores."
                             )
-                        )
+                            break
 
-                        con.commit()
-                        con.close()
-
-                        st.success("Apuesta guardada en el registro.")
-
-                else:
-                    st.warning(
-                        "No hay apuestas que cumplan el perfil "
-                        "de probabilidad mínima y EV positivo."
+                    barra.progress(
+                        (indice + 1) / len(partidos_pendientes)
                     )
 
-        except Exception as e:
-            st.error(f"No se pudo leer el CSV: {e}")
+                st.session_state["resultados_pronosticos"] = resultados
 
-    st.info(
-        "Las probabilidades introducidas en el CSV no están "
-        "verificadas automáticamente. Un 95% estimado no garantiza "
-        "un 95% real de acierto."
-    )
+        except Exception as error:
+            st.error(f"Error al consultar los partidos: {error}")
 
 
-# =====================================================
-# PESTAÑA 2: ENTRENAMIENTO
-# =====================================================
+# --------------------------------------------------
+# MOSTRAR RESULTADOS
+# --------------------------------------------------
 
-with tab2:
-    st.subheader("Entrenamiento supervisado")
+if "resultados_pronosticos" in st.session_state:
 
-    st.write(
-        "Carga datos históricos con variables numéricas y una columna "
-        "target: 1 significa acierto y 0 significa fallo."
-    )
+    resultados = st.session_state["resultados_pronosticos"]
 
-    train_file = st.file_uploader(
-        "Datos históricos CSV",
-        type=["csv"],
-        key="training"
-    )
+    st.divider()
+    st.header("📊 Pronósticos encontrados")
 
-    if train_file:
-        try:
-            data = pd.read_csv(train_file)
+    validos = [
+        r for r in resultados
+        if r["Probabilidad"] is not None
+        and r["Probabilidad"] >= umbral
+    ]
 
-            target = st.selectbox(
-                "Columna objetivo",
-                data.columns.tolist(),
-                index=(
-                    data.columns.tolist().index("target")
-                    if "target" in data.columns
-                    else len(data.columns) - 1
-                )
+    if validos:
+        st.subheader("Pronósticos que alcanzan el umbral")
+
+        for resultado in validos:
+
+            st.markdown(
+                f"### {resultado['Partido']}"
             )
-
-            features = st.multiselect(
-                "Variables predictoras numéricas",
-                [
-                    c for c in data.columns
-                    if c != target
-                    and pd.api.types.is_numeric_dtype(data[c])
-                ]
-            )
-
-            if st.button(
-                "Entrenar y evaluar",
-                disabled=not features
-            ):
-                work = data[features + [target]].copy()
-                work = work.dropna(subset=[target])
-
-                y = pd.to_numeric(
-                    work[target],
-                    errors="raise"
-                ).astype(int)
-
-                if not y.isin([0, 1]).all():
-                    raise ValueError(
-                        "La columna objetivo solo puede contener 0 y 1."
-                    )
-
-                if y.nunique() != 2:
-                    raise ValueError(
-                        "Se necesitan ejemplos de las dos clases: 0 y 1."
-                    )
-
-                X = work[features]
-
-                X_train, X_test, y_train, y_test = train_test_split(
-                    X,
-                    y,
-                    test_size=0.25,
-                    random_state=42,
-                    stratify=y
-                )
-
-                model = Pipeline([
-                    (
-                        "imputer",
-                        SimpleImputer(strategy="median")
-                    ),
-                    (
-                        "scale",
-                        StandardScaler()
-                    ),
-                    (
-                        "clf",
-                        HistGradientBoostingClassifier(
-                            max_iter=150,
-                            learning_rate=0.06,
-                            max_leaf_nodes=15,
-                            l2_regularization=1.0,
-                            random_state=42
-                        )
-                    )
-                ])
-
-                model.fit(X_train, y_train)
-
-                probs = model.predict_proba(X_test)[:, 1]
-
-                st.metric(
-                    "Exactitud",
-                    f"{accuracy_score(y_test, (probs >= 0.5).astype(int)):.1%}"
-                )
-
-                st.metric(
-                    "Brier score",
-                    f"{brier_score_loss(y_test, probs):.4f}"
-                )
-
-                st.metric(
-                    "Log loss",
-                    f"{log_loss(y_test, probs):.4f}"
-                )
-
-                joblib.dump(
-                    {
-                        "model": model,
-                        "features": features
-                    },
-                    MODEL_PATH
-                )
-
-                st.success("Modelo entrenado y guardado.")
-
-                st.warning(
-                    "Esta evaluación aleatoria es inicial. "
-                    "Antes de usar el modelo hay que validarlo con "
-                    "datos separados cronológicamente."
-                )
-
-        except Exception as e:
-            st.error(f"Error de entrenamiento: {e}")
-
-    if os.path.exists(MODEL_PATH):
-        try:
-            obj = joblib.load(MODEL_PATH)
 
             st.write(
-                "Modelo disponible. Variables:",
-                ", ".join(obj["features"])
+                f"**Pronóstico:** {resultado['Pronóstico']}"
             )
 
-            pred_file = st.file_uploader(
-                "CSV de eventos futuros",
-                type=["csv"],
-                key="prediction"
+            st.write(
+                f"**Probabilidad estimada:** "
+                f"{resultado['Probabilidad']:.1f}%"
             )
 
-            if pred_file:
-                future = pd.read_csv(pred_file)
+            st.write(
+                f"**Liga:** {resultado['Liga']}"
+            )
 
-                missing = [
-                    f for f in obj["features"]
-                    if f not in future.columns
-                ]
+            if resultado["Consejo API"]:
+                st.write(
+                    f"**Consejo del modelo:** "
+                    f"{resultado['Consejo API']}"
+                )
 
-                if missing:
-                    st.error(
-                        "Faltan variables: " + ", ".join(missing)
-                    )
+            st.warning(
+                "Pendiente de comprobar una cuota real y el valor esperado. "
+                "Esto todavía no es una apuesta validada."
+            )
 
-                else:
-                    future["probability"] = (
-                        obj["model"].predict_proba(
-                            future[obj["features"]]
-                        )[:, 1]
-                    )
+            st.divider()
 
-                    st.dataframe(
-                        future,
-                        use_container_width=True
-                    )
-
-                    st.download_button(
-                        "Descargar probabilidades",
-                        future.to_csv(index=False),
-                        "predicciones_smartbet.csv",
-                        "text/csv"
-                    )
-
-        except Exception as e:
-            st.error(f"No se pudo cargar el modelo: {e}")
-
-
-# =====================================================
-# PESTAÑA 3: REGISTRO
-# =====================================================
-
-with tab3:
-    st.subheader("Historial de apuestas")
-
-    con = db()
-
-    hist = pd.read_sql_query(
-        "SELECT * FROM bets ORDER BY id DESC",
-        con
-    )
-
-    if len(hist) > 0:
-        st.dataframe(
-            hist,
-            use_container_width=True
+    else:
+        st.warning(
+            f"Ningún partido ha alcanzado el {umbral}% "
+            "de probabilidad estimada."
         )
 
-        pending = hist[
-            hist["status"] == "Pendiente"
-        ]
+    st.subheader("Todos los partidos consultados")
 
-        if len(pending) > 0:
-            ids = pending["id"].tolist()
+    tabla = pd.DataFrame(resultados)
 
-            bet_id = st.selectbox(
-                "Apuesta pendiente",
-                ids
-            )
+    st.dataframe(
+        tabla,
+        use_container_width=True,
+        hide_index=True
+    )
 
-            outcome = st.radio(
-                "Resultado",
-                ["Ganada", "Perdida", "Anulada"],
-                horizontal=True
-            )
+    st.download_button(
+        "Descargar pronósticos en CSV",
+        data=tabla.to_csv(index=False).encode("utf-8-sig"),
+        file_name="pronosticos_smartbet.csv",
+        mime="text/csv"
+    )
 
-            if st.button("Liquidar apuesta"):
-                r = hist[hist["id"] == bet_id].iloc[0]
+# --------------------------------------------------
+# AVISO FINAL
+# --------------------------------------------------
 
-      
+st.divider()
+
+st.caption(
+    "SmartBet AI es una herramienta informativa. "
+    "Las probabilidades son estimaciones, no garantías. "
+    "No realiza apuestas automáticamente."
+)
