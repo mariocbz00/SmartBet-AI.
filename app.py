@@ -45,9 +45,11 @@ if st.button("Comprobar acceso a partidos"):
             st.error(f"Error de API: {datos_partidos.get('errors')}")
         else:
             partidos = datos_partidos.get("response", [])
+            if partidos:
+    st.session_state["fixture_id"] = partidos[0]["fixture"]["id"]
             st.success(f"Consulta correcta. Partidos encontrados: {len(partidos)}")
             if partidos:
-                st.write(partidos[0])
+                st.write(partidos[10])
     except Exception:
         st.error("No se pudo consultar la API.")
 st.title("📊 SmartBet AI")
@@ -56,7 +58,7 @@ if st.button("Comprobar estadísticas"):
         respuesta_estadisticas = requests.get(
             "https://v3.football.api-sports.io/fixtures/statistics",
             headers={"x-apisports-key": API_KEY},
-            params={"fixture": 1598819},
+            params={"fixture": st.session_state.get("fixture_id", 1598819)},
             timeout=15
         )
         datos_estadisticas = respuesta_estadisticas.json()
