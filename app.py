@@ -9,7 +9,8 @@ from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 import joblib
-
+import requests
+API_KEY = st.secrets.get( API_SPORTS_KEY)
 DB_PATH = os.getenv("SMARTBET_DB", "smartbet.db")
 MODEL_PATH = "smartbet_model.joblib"
 
