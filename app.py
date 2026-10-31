@@ -36,7 +36,7 @@ if st.button("Comprobar acceso a partidos"):
         respuesta_partidos = requests.get(
             "https://v3.football.api-sports.io/fixtures",
             headers={"x-apisports-key": API_KEY},
-            params={"date": "2024-05-19", "league": 140, "season": 2023},,
+            params={"date": "2024-05-19", "league": 140, "season": 2023},
             timeout=15
         )
         datos_partidos = respuesta_partidos.json()
