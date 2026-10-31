@@ -47,6 +47,7 @@ if st.button("Comprobar acceso a partidos"):
             partidos = datos_partidos.get("response", [])
             if partidos:
               st.session_state["fixture_id"] = partidos[0]["fixture"]["id"]
+                st.session_state["fixture_ids"] = [p["fixture"]["id"] for p in partidos[:10]]
             st.success(f"Consulta correcta. Partidos encontrados: {len(partidos)}")
             if partidos:
                 st.write(partidos[:10])
@@ -54,26 +55,37 @@ if st.button("Comprobar acceso a partidos"):
         st.error("No se pudo consultar la API.")
 st.title("📊 SmartBet AI")
 if st.button("Comprobar estadísticas"):
-    try:
-        respuesta_estadisticas = requests.get(
-            "https://v3.football.api-sports.io/fixtures/statistics",
-            headers={"x-apisports-key": API_KEY},
-            params={"fixture": 1493224},
-            timeout=15
-        )
-        datos_estadisticas = respuesta_estadisticas.json()
+    fixture_ids = st.session_state.get("fixture_ids", [])
 
-        if datos_estadisticas.get("errors"):
-            st.error(f"Error: {datos_estadisticas.get('errors')}")
-        else:
-            estadisticas = datos_estadisticas.get("response", [])
-            if estadisticas:
-                st.success("Consulta de estadísticas correcta")
-                st.write(estadisticas)
-            else:
-                st.warning("No hay estadísticas disponibles para ese partido")
-    except Exception:
-        st.error("No se pudieron consultar las estadísticas")
+    if not fixture_ids:
+        st.warning("Primero consulta los partidos.")
+    else:
+        for fixture_id in fixture_ids:
+            try:
+                respuesta_estadisticas = requests.get(
+                    "https://v3.football.api-sports.io/fixtures/statistics",
+                    headers={"x-apisports-key": API_KEY},
+                    params={"fixture": fixture_id},
+                    timeout=15
+                )
+
+                datos_estadisticas = respuesta_estadisticas.json()
+
+                st.write(f"Partido ID: {fixture_id}")
+
+                if datos_estadisticas.get("errors"):
+                    st.error(f"Error: {datos_estadisticas.get('errors')}")
+                else:
+                    estadisticas = datos_estadisticas.get("response", [])
+
+                    if estadisticas:
+                        st.success("Estadísticas disponibles")
+                        st.write(estadisticas)
+                    else:
+                        st.warning("Sin estadísticas disponibles")
+
+            except Exception as e:
+                st.error(f"Error al consultar {fixture_id}: {e}")
 st.caption("Analizador probabilístico multideporte · valor esperado · registro de apuestas")
 def db():
     con=sqlite3.connect(DB_PATH)
