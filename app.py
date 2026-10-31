@@ -51,6 +51,27 @@ if st.button("Comprobar acceso a partidos"):
     except Exception:
         st.error("No se pudo consultar la API.")
 st.title("📊 SmartBet AI")
+if st.button("Comprobar estadísticas"):
+    try:
+        respuesta_estadisticas = requests.get(
+            "https://v3.football.api-sports.io/fixtures/statistics",
+            headers={"x-apisports-key": API_KEY},
+            params={"fixture": 1598819},
+            timeout=15
+        )
+        datos_estadisticas = respuesta_estadisticas.json()
+
+        if datos_estadisticas.get("errors"):
+            st.error(f"Error: {datos_estadisticas.get('errors')}")
+        else:
+            estadisticas = datos_estadisticas.get("response", [])
+            if estadisticas:
+                st.success("Consulta de estadísticas correcta")
+                st.write(estadisticas)
+            else:
+                st.warning("No hay estadísticas disponibles para ese partido")
+    except Exception:
+        st.error("No se pudieron consultar las estadísticas")
 st.caption("Analizador probabilístico multideporte · valor esperado · registro de apuestas")
 def db():
     con=sqlite3.connect(DB_PATH)
