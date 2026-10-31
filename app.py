@@ -15,6 +15,22 @@ DB_PATH = os.getenv("SMARTBET_DB", "smartbet.db")
 MODEL_PATH = "smartbet_model.joblib"
 
 st.set_page_config(page_title="SmartBet AI", page_icon="📊", layout="wide")
+if API_KEY:
+    try:
+        respuesta_api = requests.get(
+            "https://v3.football.api-sports.io/status",
+            headers={"x-apisports-key": API_KEY},
+            timeout=15
+        )
+        datos_api = respuesta_api.json()
+        if datos_api.get("errors"):
+            st.sidebar.write("API-Sports: clave o acceso no autorizado")
+        else:
+            st.sidebar.write("API-Sports: conexión correcta")
+    except Exception:
+        st.sidebar.write("API-Sports: no se pudo conectar")
+else:
+    st.sidebar.write("API-Sports: falta configurar la clave")
 st.title("📊 SmartBet AI")
 st.caption("Analizador probabilístico multideporte · valor esperado · registro de apuestas")
 
