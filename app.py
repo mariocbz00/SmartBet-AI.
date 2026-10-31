@@ -42,7 +42,7 @@ if st.button("Comprobar acceso a partidos"):
         datos_partidos = respuesta_partidos.json()
 
         if datos_partidos.get("errors"):
-            st.error("La API no permite consultar partidos con esta clave.")
+            st.error(f"Error de API: {datos_partidos.get('errors')}")
         else:
             partidos = datos_partidos.get("response", [])
             st.success(f"Consulta correcta. Partidos encontrados: {len(partidos)}")
