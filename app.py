@@ -49,7 +49,7 @@ if st.button("Comprobar acceso a partidos"):
               st.session_state["fixture_id"] = partidos[0]["fixture"]["id"]
             st.success(f"Consulta correcta. Partidos encontrados: {len(partidos)}")
             if partidos:
-                st.write(partidos[10])
+                st.write(partidos[:10])
     except Exception:
         st.error("No se pudo consultar la API.")
 st.title("📊 SmartBet AI")
