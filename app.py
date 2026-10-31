@@ -1,57 +1,54 @@
-
 import streamlit as st
 import requests
 import pandas as pd
 import json
 from datetime import date
 
-# --------------------------------------------------
-# CONFIGURACIÓN
-# --------------------------------------------------
-
 st.set_page_config(
     page_title="SmartBet AI",
-    page_icon="⚽",
+    page_icon="🏆",
     layout="wide"
 )
 
-st.title("⚽ SmartBet AI")
-st.caption("Pronósticos automáticos de fútbol")
+st.title("🏆 SMARTBET AI")
+st.caption("Fútbol y fútbol australiano")
 
-API_URL = "https://v3.football.api-sports.io"
+# =====================================
+# CONFIGURACIÓN
+# =====================================
 
 try:
     API_KEY = st.secrets["API_SPORTS_KEY"]
 except Exception:
     API_KEY = ""
 
-# --------------------------------------------------
-# CONEXIÓN CON API-FOOTBALL
-# --------------------------------------------------
+FOOTBALL_URL = "https://v3.football.api-sports.io"
+AFL_URL = "https://v1.afl.api-sports.io"
 
-def consultar_api(endpoint, parametros=None):
+HEADERS = {"x-apisports-key": API_KEY}
+
+# =====================================
+# CONEXIÓN Y CACHÉ
+# =====================================
+
+def pedir_api(url, endpoint, parametros):
     if not API_KEY:
-        raise Exception(
-            "Falta la clave API_SPORTS_KEY en los Secrets de Streamlit."
-        )
-
-    url = f"{API_URL}/{endpoint}"
+        raise Exception("No está configurada API_SPORTS_KEY.")
 
     respuesta = requests.get(
-        url,
-        headers={"x-apisports-key": API_KEY},
-        params=parametros or {},
+        f"{url}/{endpoint}",
+        headers=HEADERS,
+        params=parametros,
         timeout=25
     )
 
     if respuesta.status_code == 429:
         raise Exception(
-            "Límite de consultas alcanzado (429). "
-            "Espera antes de volver a consultar."
+            "Límite de consultas alcanzado. "
+            "Espera al menos un minuto."
         )
 
     respuesta.raise_for_status()
-
     datos = respuesta.json()
 
     if datos.get("errors"):
@@ -60,328 +57,367 @@ def consultar_api(endpoint, parametros=None):
     return datos.get("response", [])
 
 
-# --------------------------------------------------
-# FUNCIONES DE PRONÓSTICO
-# --------------------------------------------------
+@st.cache_data(ttl=60, show_spinner=False)
+def consultar_futbol(fecha_texto):
+    return pedir_api(
+        FOOTBALL_URL,
+        "fixtures",
+        {
+            "date": fecha_texto,
+            "timezone": "Europe/Madrid"
+        }
+    )
 
-def convertir_porcentaje(valor):
+
+@st.cache_data(ttl=60, show_spinner=False)
+def consultar_afl(fecha_texto):
+    return pedir_api(
+        AFL_URL,
+        "games",
+        {
+            "date": fecha_texto,
+            "timezone": "Europe/Madrid"
+        }
+    )
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def consultar_prediccion(fixture_id):
+    return pedir_api(
+        FOOTBALL_URL,
+        "predictions",
+        {"fixture": fixture_id}
+    )
+
+
+# =====================================
+# FUNCIONES DE FÚTBOL
+# =====================================
+
+def porcentaje(valor):
     if valor is None:
         return None
-
     try:
         return float(str(valor).replace("%", "").strip())
     except (ValueError, TypeError):
         return None
 
 
-def obtener_pronostico(fixture_id):
-    resultados = consultar_api(
-        "predictions",
-        {"fixture": fixture_id}
+def analizar_futbol(partido):
+    predicciones = consultar_prediccion(
+        partido["fixture"]["id"]
     )
 
-    if not resultados:
+    if not predicciones:
         return None
 
-    return resultados[0]
+    pred = predicciones[0]
+    equipos = partido["teams"]
+    local = equipos["home"]["name"]
+    visitante = equipos["away"]["name"]
 
-
-def extraer_porcentajes(prediccion):
-    porcentajes = (
-        prediccion.get("predictions", {})
-        .get("percent", {})
-    )
-
-    return {
-        "local": convertir_porcentaje(porcentajes.get("home")),
-        "empate": convertir_porcentaje(porcentajes.get("draw")),
-        "visitante": convertir_porcentaje(porcentajes.get("away"))
-    }
-
-
-def elegir_favorito(prediccion, equipo_local, equipo_visitante):
-    porcentajes = extraer_porcentajes(prediccion)
+    p = pred.get("predictions", {}).get("percent", {})
 
     opciones = {
-        equipo_local: porcentajes["local"],
-        "Empate": porcentajes["empate"],
-        equipo_visitante: porcentajes["visitante"]
+        local: porcentaje(p.get("home")),
+        "Empate": porcentaje(p.get("draw")),
+        visitante: porcentaje(p.get("away"))
     }
 
-    disponibles = {
-        equipo: porcentaje
-        for equipo, porcentaje in opciones.items()
-        if porcentaje is not None
+    opciones = {
+        nombre: valor
+        for nombre, valor in opciones.items()
+        if valor is not None
     }
 
-    if not disponibles:
-        return None, None
+    if not opciones:
+        return None
 
-    favorito = max(disponibles, key=disponibles.get)
+    favorito = max(opciones, key=opciones.get)
+    prob = opciones[favorito]
 
-    return favorito, disponibles[favorito]
+    return {
+        "Partido": f"{local} - {visitante}",
+        "Pronóstico": (
+            "Empate" if favorito == "Empate"
+            else f"Gana {favorito}"
+        ),
+        "Probabilidad": prob,
+        "Liga": partido.get("league", {}).get("name", ""),
+        "Consejo": pred.get("predictions", {}).get("advice", "")
+    }
 
 
-# --------------------------------------------------
-# PANEL LATERAL
-# --------------------------------------------------
+# =====================================
+# FUNCIONES DE AFL
+# =====================================
+
+def buscar_valor(objeto, claves):
+    if not isinstance(objeto, dict):
+        return None
+
+    for clave in claves:
+        if clave in objeto:
+            return objeto[clave]
+
+    return None
+
+
+def mostrar_partido_afl(partido):
+    equipos = partido.get("teams", {})
+    juego = partido.get("game", partido.get("fixture", {}))
+    if not isinstance(juego, dict):
+        juego = {}
+
+    local = buscar_valor(
+        equipos,
+        ["home", "local"]
+    )
+    visitante = buscar_valor(
+        equipos,
+        ["away", "visitor", "visitors"]
+    )
+
+    def nombre_equipo(equipo):
+        if isinstance(equipo, dict):
+            return equipo.get("name", "No disponible")
+        return str(equipo or "No disponible")
+
+    estado = juego.get("status", {})
+    if isinstance(estado, dict):
+        estado = estado.get("long", estado.get("short", "No indicado"))
+
+    return {
+        "Partido": (
+            f"{nombre_equipo(local)} - "
+            f"{nombre_equipo(visitante)}"
+        ),
+        "Estado": estado,
+        "Datos recibidos": json.dumps(
+            partido,
+            ensure_ascii=False
+        )
+    }
+
+
+# =====================================
+# MENÚ LATERAL
+# =====================================
 
 st.sidebar.header("Configuración")
 
 fecha = st.sidebar.date_input(
-    "Fecha de los partidos",
+    "Fecha de partidos",
     value=date.today()
 )
 
-umbral = st.sidebar.slider(
-    "Probabilidad mínima (%)",
-    min_value=50,
-    max_value=99,
-    value=95
-)
+fecha_texto = fecha.strftime("%Y-%m-%d")
 
-limite_partidos = st.sidebar.selectbox(
-    "Máximo de partidos por consulta",
-    [3, 5, 8, 10],
-    index=1
-)
+st.sidebar.write("Conexión API:")
 
 if API_KEY:
-    st.sidebar.success("Conexión API configurada")
+    st.sidebar.success("Clave configurada")
 else:
-    st.sidebar.error("Falta configurar la clave API")
+    st.sidebar.error("Falta API_SPORTS_KEY")
 
 
-# --------------------------------------------------
-# EXPLICACIÓN
-# --------------------------------------------------
+# =====================================
+# PESTAÑAS
+# =====================================
 
-st.info(
-    "SmartBet AI consulta los partidos y sus predicciones. "
-    "Solo destacará los pronósticos que alcancen el porcentaje "
-    "mínimo seleccionado. Una predicción no garantiza un resultado."
+tab_futbol, tab_afl, tab_registro = st.tabs(
+    ["⚽ FÚTBOL", "🏉 AFL", "📊 RESULTADOS"]
 )
 
-# --------------------------------------------------
-# BOTÓN PRINCIPAL
-# --------------------------------------------------
+# =====================================
+# FÚTBOL
+# =====================================
 
-if st.button("🔎 BUSCAR PARTIDOS Y GENERAR PRONÓSTICOS", type="primary"):
+with tab_futbol:
 
-    if not API_KEY:
-        st.error(
-            "Configura API_SPORTS_KEY en los Secrets de Streamlit."
-        )
+    st.header("Pronósticos de fútbol")
 
-    else:
+    umbral = st.slider(
+        "Probabilidad mínima (%)",
+        50, 99, 95
+    )
+
+    cantidad = st.selectbox(
+        "Número de partidos",
+        [1, 2, 3, 4],
+        index=2
+    )
+
+    if st.button("Buscar partidos de fútbol"):
+
         try:
             with st.spinner("Buscando partidos..."):
+                partidos = consultar_futbol(fecha_texto)
 
-                partidos = consultar_api(
-                    "fixtures",
-                    {
-                        "date": fecha.strftime("%Y-%m-%d"),
-                        "timezone": "Europe/Madrid"
-                    }
-                )
-
-            # Solo partidos que todavía no han comenzado
-            partidos_pendientes = [
+            pendientes = [
                 p for p in partidos
-                if p.get("fixture", {}).get("status", {}).get("short") == "NS"
+                if p.get("fixture", {})
+                .get("status", {})
+                .get("short") == "NS"
             ]
 
-            partidos_pendientes = partidos_pendientes[:limite_partidos]
+            pendientes = pendientes[:cantidad]
 
-            if not partidos_pendientes:
-                st.warning(
-                    "No se encontraron partidos pendientes "
-                    "para esa fecha."
+            if not pendientes:
+                st.info("No hay partidos pendientes en esa fecha.")
+
+            else:
+                resultados = []
+                barra = st.progress(0)
+
+                for i, partido in enumerate(pendientes):
+                    try:
+                        resultado = analizar_futbol(partido)
+
+                        if resultado:
+                            resultados.append(resultado)
+
+                    except Exception as error:
+                        st.warning(str(error))
+                        if "429" in str(error):
+                            break
+
+                    barra.progress((i + 1) / len(pendientes))
+
+                st.session_state["futbol_resultados"] = resultados
+
+                if resultados:
+                    st.success("Pronósticos recibidos.")
+                else:
+                    st.warning("No se recibieron pronósticos.")
+
+        except Exception as error:
+            st.error(f"Error en fútbol: {error}")
+
+    resultados = st.session_state.get("futbol_resultados", [])
+
+    for r in resultados:
+        st.subheader(r["Partido"])
+        st.write(f"**Pronóstico:** {r['Pronóstico']}")
+        st.write(f"**Probabilidad estimada:** {r['Probabilidad']}%")
+        st.write(f"**Liga:** {r['Liga']}")
+
+        if r["Consejo"]:
+            st.write(f"Consejo del modelo: {r['Consejo']}")
+
+        if r["Probabilidad"] >= umbral:
+            st.warning(
+                "Alcanza el filtro de probabilidad. "
+                "Falta comprobar cuota y valor esperado."
+            )
+        else:
+            st.info("NO APOSTAR: no alcanza el filtro.")
+
+        st.divider()
+
+
+# =====================================
+# AFL
+# =====================================
+
+with tab_afl:
+
+    st.header("Fútbol australiano (AFL)")
+
+    st.write(
+        "Consulta encuentros de AFL disponibles en API-Sports."
+    )
+
+    if st.button("Buscar partidos AFL"):
+
+        try:
+            with st.spinner("Consultando calendario AFL..."):
+                partidos_afl = consultar_afl(fecha_texto)
+
+            if not partidos_afl:
+                st.info(
+                    "No hay partidos AFL disponibles para esa fecha."
                 )
 
             else:
+                filas = [
+                    mostrar_partido_afl(p)
+                    for p in partidos_afl
+                ]
+
+                st.session_state["afl_resultados"] = filas
                 st.success(
-                    f"Se han encontrado {len(partidos_pendientes)} partidos."
+                    f"Se encontraron {len(filas)} encuentros."
                 )
-
-                resultados = []
-
-                barra = st.progress(0)
-
-                for indice, partido in enumerate(partidos_pendientes):
-
-                    fixture = partido.get("fixture", {})
-                    equipos = partido.get("teams", {})
-                    liga = partido.get("league", {})
-
-                    equipo_local = equipos.get("home", {}).get(
-                        "name", "Local"
-                    )
-
-                    equipo_visitante = equipos.get("away", {}).get(
-                        "name", "Visitante"
-                    )
-
-                    fixture_id = fixture.get("id")
-
-                    try:
-                        prediccion = obtener_pronostico(fixture_id)
-
-                        if not prediccion:
-                            resultados.append({
-                                "Partido": f"{equipo_local} - {equipo_visitante}",
-                                "Pronóstico": "Sin datos",
-                                "Probabilidad": None,
-                                "Liga": liga.get("name", ""),
-                                "Consejo API": "",
-                                "Estado": "NO APOSTAR"
-                            })
-
-                        else:
-                            favorito, porcentaje = elegir_favorito(
-                                prediccion,
-                                equipo_local,
-                                equipo_visitante
-                            )
-
-                            consejo = prediccion.get(
-                                "predictions", {}
-                            ).get("advice", "")
-
-                            if favorito is None:
-                                estado = "NO APOSTAR"
-                                pronostico = "Sin datos suficientes"
-
-                            elif porcentaje >= umbral:
-                                estado = (
-                                    "PENDIENTE DE COMPROBAR CUOTA"
-                                )
-                                pronostico = f"Gana {favorito}" if favorito != "Empate" else "Empate"
-
-                            else:
-                                estado = "NO APOSTAR"
-                                pronostico = (
-                                    f"Favorito: {favorito}"
-                                )
-
-                            resultados.append({
-                                "Partido": f"{equipo_local} - {equipo_visitante}",
-                                "Pronóstico": pronostico,
-                                "Probabilidad": porcentaje,
-                                "Liga": liga.get("name", ""),
-                                "Consejo API": consejo,
-                                "Estado": estado
-                            })
-
-                    except Exception as error:
-                        mensaje = str(error)
-
-                        st.warning(
-                            f"No se pudo consultar "
-                            f"{equipo_local} - {equipo_visitante}: {mensaje}"
-                        )
-
-                        # Si se alcanza el límite, detener las consultas
-                        if "429" in mensaje or "Límite" in mensaje:
-                            st.error(
-                                "Se detuvieron las consultas para "
-                                "evitar más errores."
-                            )
-                            break
-
-                    barra.progress(
-                        (indice + 1) / len(partidos_pendientes)
-                    )
-
-                st.session_state["resultados_pronosticos"] = resultados
 
         except Exception as error:
-            st.error(f"Error al consultar los partidos: {error}")
+            st.error(f"Error en AFL: {error}")
 
+    filas = st.session_state.get("afl_resultados", [])
 
-# --------------------------------------------------
-# MOSTRAR RESULTADOS
-# --------------------------------------------------
+    if filas:
+        for partido in filas:
+            st.subheader(partido["Partido"])
+            st.write(f"**Estado:** {partido['Estado']}")
 
-if "resultados_pronosticos" in st.session_state:
-
-    resultados = st.session_state["resultados_pronosticos"]
-
-    st.divider()
-    st.header("📊 Pronósticos encontrados")
-
-    validos = [
-        r for r in resultados
-        if r["Probabilidad"] is not None
-        and r["Probabilidad"] >= umbral
-    ]
-
-    if validos:
-        st.subheader("Pronósticos que alcanzan el umbral")
-
-        for resultado in validos:
-
-            st.markdown(
-                f"### {resultado['Partido']}"
-            )
-
-            st.write(
-                f"**Pronóstico:** {resultado['Pronóstico']}"
-            )
-
-            st.write(
-                f"**Probabilidad estimada:** "
-                f"{resultado['Probabilidad']:.1f}%"
-            )
-
-            st.write(
-                f"**Liga:** {resultado['Liga']}"
-            )
-
-            if resultado["Consejo API"]:
-                st.write(
-                    f"**Consejo del modelo:** "
-                    f"{resultado['Consejo API']}"
+            with st.expander("Ver datos recibidos de la API"):
+                st.code(
+                    partido["Datos recibidos"],
+                    language="json"
                 )
-
-            st.warning(
-                "Pendiente de comprobar una cuota real y el valor esperado. "
-                "Esto todavía no es una apuesta validada."
-            )
 
             st.divider()
 
-    else:
-        st.warning(
-            f"Ningún partido ha alcanzado el {umbral}% "
-            "de probabilidad estimada."
+        st.caption(
+            "Esta sección muestra datos de partidos. "
+            "Todavía no genera probabilidades de victoria para AFL."
         )
 
-    st.subheader("Todos los partidos consultados")
 
-    tabla = pd.DataFrame(resultados)
+# =====================================
+# RESULTADOS
+# =====================================
 
-    st.dataframe(
-        tabla,
-        use_container_width=True,
-        hide_index=True
-    )
+with tab_registro:
 
-    st.download_button(
-        "Descargar pronósticos en CSV",
-        data=tabla.to_csv(index=False).encode("utf-8-sig"),
-        file_name="pronosticos_smartbet.csv",
-        mime="text/csv"
-    )
+    st.header("Resultados de consultas")
 
-# --------------------------------------------------
-# AVISO FINAL
-# --------------------------------------------------
+    futbol = st.session_state.get("futbol_resultados", [])
+    afl = st.session_state.get("afl_resultados", [])
+
+    st.metric("Pronósticos de fútbol", len(futbol))
+    st.metric("Partidos AFL consultados", len(afl))
+
+    if futbol:
+        st.subheader("Fútbol")
+        st.dataframe(
+            pd.DataFrame(futbol),
+            use_container_width=True,
+            hide_index=True
+        )
+
+    if afl:
+        st.subheader("AFL")
+        st.dataframe(
+            pd.DataFrame([
+                {
+                    "Partido": p["Partido"],
+                    "Estado": p["Estado"]
+                }
+                for p in afl
+            ]),
+            use_container_width=True,
+            hide_index=True
+        )
+
+
+# =====================================
+# AVISO
+# =====================================
 
 st.divider()
 
 st.caption(
-    "SmartBet AI es una herramienta informativa. "
-    "Las probabilidades son estimaciones, no garantías. "
-    "No realiza apuestas automáticamente."
+    "SmartBet AI no garantiza resultados ni realiza apuestas. "
+    "Las predicciones son estimaciones y requieren validación."
 )
